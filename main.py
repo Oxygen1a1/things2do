@@ -17,6 +17,7 @@ class Event:
         self.last_update = self.created_at  # 上次更新的位置时间，初始为创建时间
         self.end_date = end_date  # 结束时间
         self.canvas_id = None  # 用于关联 Canvas 上的图形对象
+        self.text_id = None    # 用于关联 Canvas 上的文本对象
 
     def update_position(self):
         # 获取当前时间
@@ -87,8 +88,15 @@ class Things2DoApp:
         self.event_listbox.config(yscrollcommand=self.scrollbar.set)
         self.scrollbar.config(command=self.event_listbox.yview)
 
+        # 初始化拖拽状态
+        self.dragging_event = None  # 当前正在拖动的事件
+        self.dragging_data = {}     # 拖动相关的数据
+
         # 绑定鼠标事件
-        self.canvas.bind("<Button-1>", self.on_left_click)
+        self.canvas.bind("<ButtonPress-1>", self.on_canvas_press)
+        self.canvas.bind("<ButtonRelease-1>", self.on_canvas_release)
+        self.canvas.bind("<B1-Motion>", self.on_canvas_motion)
+        self.canvas.bind("<Double-Button-1>", self.on_double_click)
         self.canvas.bind("<Button-3>", self.on_right_click)
 
         # 加载事件
@@ -160,13 +168,72 @@ class Things2DoApp:
         grid_y = int(y / self.cell_size)
         return grid_x, grid_y
 
-    def on_left_click(self, event):
+    def on_canvas_press(self, event):
+        x, y = event.x, event.y
+        clicked_items = self.canvas.find_overlapping(x, y, x, y)
+        for item in clicked_items:
+            for event_obj in self.events:
+                if item == event_obj.canvas_id or item == event_obj.text_id:
+                    # 开始拖动此事件
+                    self.dragging_event = event_obj
+                    # 记录光标与图形中心的偏移
+                    coords = self.canvas.coords(event_obj.canvas_id)
+                    item_x = (coords[0] + coords[2]) / 2
+                    item_y = (coords[1] + coords[3]) / 2
+                    self.dragging_data = {
+                        "x_offset": item_x - x,
+                        "y_offset": item_y - y
+                    }
+                    return  # 找到后退出
+
+    def on_canvas_motion(self, event):
+        if self.dragging_event is not None:
+            x = event.x
+            y = event.y
+            new_x = x + self.dragging_data["x_offset"]
+            new_y = y + self.dragging_data["y_offset"]
+
+            # 保持在画布范围内
+            new_x = max(0, min(new_x, self.canvas_size))
+            new_y = max(0, min(new_y, self.canvas_size))
+
+            # 移动圆形和文本
+            coords = self.canvas.coords(self.dragging_event.canvas_id)
+            curr_x = (coords[0] + coords[2]) / 2
+            curr_y = (coords[1] + coords[3]) / 2
+            dx = new_x - curr_x
+            dy = new_y - curr_y
+            self.canvas.move(self.dragging_event.canvas_id, dx, dy)
+            self.canvas.move(self.dragging_event.text_id, dx, dy)
+
+    def on_canvas_release(self, event):
+        if self.dragging_event is not None:
+            x = event.x
+            y = event.y
+            x = max(0, min(x, self.canvas_size - 1))
+            y = max(0, min(y, self.canvas_size - 1))
+            grid_x, grid_y = self.get_grid_position(x, y)
+            self.dragging_event.x = grid_x
+            self.dragging_event.y = grid_y
+
+            # 重新绘制事件，使其对齐网格
+            self.canvas.delete(self.dragging_event.canvas_id)
+            self.canvas.delete(self.dragging_event.text_id)
+            self.draw_event(self.dragging_event)
+
+            # 更新列表框
+            self.update_event_listbox()
+
+            # 重置拖动状态
+            self.dragging_event = None
+            self.dragging_data = {}
+
+    def on_double_click(self, event):
         x, y = event.x, event.y
         grid_x, grid_y = self.get_grid_position(x, y)
         event_obj = self.get_event_at_position(grid_x, grid_y)
         if event_obj:
             self.show_event_details(event_obj)
-        # 如果没有任务，左键点击暂时不做处理
 
     def on_right_click(self, event):
         # 获取点击的网格坐标
@@ -194,6 +261,7 @@ class Things2DoApp:
         if messagebox.askyesno("删除任务", f"确定要删除 '{event_obj.name}' 吗？"):
             self.events.remove(event_obj)
             self.canvas.delete(event_obj.canvas_id)
+            self.canvas.delete(event_obj.text_id)
             self.update_event_listbox()
 
     def modify_event_dialog(self, event):
@@ -244,6 +312,7 @@ class Things2DoApp:
                 event.end_date = None
             # 更新事件显示
             self.canvas.delete(event.canvas_id)
+            self.canvas.delete(event.text_id)
             self.draw_event(event)
             self.update_event_listbox()
             dialog.destroy()
@@ -313,11 +382,12 @@ class Things2DoApp:
         # 根据紧急性设置颜色
         color = self.get_color_by_urgency(event.y)
 
-        id = self.canvas.create_oval(x - r, y - r, x + r, y + r, fill=color)
+        circle_id = self.canvas.create_oval(x - r, y - r, x + r, y + r, fill=color)
         # 保存图形对象的 id，以便后续操作
-        event.canvas_id = id
+        event.canvas_id = circle_id
         # 在事件上显示名称
-        self.canvas.create_text(x, y, text=event.name[:8], font=("Arial", 8), fill="black")
+        text_id = self.canvas.create_text(x, y, text=event.name[:8], font=("Arial", 8), fill="black")
+        event.text_id = text_id
 
     def get_color_by_urgency(self, y):
         """根据紧急性返回颜色"""
@@ -361,6 +431,7 @@ class Things2DoApp:
             event.y = min(max(event.y, 0), self.grid_count - 1)
             # 更新 Canvas 上的图形位置
             self.canvas.delete(event.canvas_id)
+            self.canvas.delete(event.text_id)
             self.draw_event(event)
         # 更新 Listbox
         self.update_event_listbox()
